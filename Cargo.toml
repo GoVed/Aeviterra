@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "aeviterra-core",
+    "aeviterra-cli",
+]
+resolver = "2"
