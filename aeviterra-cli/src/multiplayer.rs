@@ -264,3 +264,137 @@ impl TwoSessionEnvironment {
         }
     }
 }
+
+/// Tri-Party Peered Network Environment (Three Gemini Agents Playing Together).
+pub struct TriPartyEnvironment {
+    pub world_id: Hash,
+    pub session_vanguard: PeeredGameSession,
+    pub session_arcanist: PeeredGameSession,
+    pub session_artisan: PeeredGameSession,
+    pub net: SimulatedNetwork,
+    pub current_tick: u64,
+}
+
+impl TriPartyEnvironment {
+    pub fn new() -> Result<Self, MathError> {
+        let world_id = *b"AEVITERRA_WORLD_CANONICAL_2026_0";
+        let vanguard_pub = [31u8; 32];
+        let vanguard_sec = [32u8; 32];
+        let arcanist_pub = [41u8; 32];
+        let arcanist_sec = [42u8; 32];
+        let artisan_pub  = [51u8; 32];
+        let artisan_sec  = [52u8; 32];
+
+        let mut session_vanguard = PeeredGameSession::new(
+            1001,
+            "Gemini_Vanguard".to_string(),
+            vanguard_pub,
+            vanguard_sec,
+            "192.168.1".to_string(),
+            world_id,
+        )?;
+
+        let mut session_arcanist = PeeredGameSession::new(
+            1002,
+            "Gemini_Arcanist".to_string(),
+            arcanist_pub,
+            arcanist_sec,
+            "10.0.1".to_string(),
+            world_id,
+        )?;
+
+        let mut session_artisan = PeeredGameSession::new(
+            1003,
+            "Gemini_Artisan".to_string(),
+            artisan_pub,
+            artisan_sec,
+            "172.16.1".to_string(),
+            world_id,
+        )?;
+
+        // Position players in adjacent regions of the world
+        let arc_x = Q64::from_int(72)?;
+        let arc_z = Q64::from_int(70)?;
+        let arc_y = session_arcanist.sim.terrain.elevation_at(arc_x, arc_z)?;
+        session_arcanist.sim.player.position = Vec3Fixed::new(arc_x, arc_y, arc_z);
+        session_arcanist.sim.player.combat.active_weapon = WeaponFamily::WandPrism;
+
+        let art_x = Q64::from_int(58)?;
+        let art_z = Q64::from_int(60)?;
+        let art_y = session_artisan.sim.terrain.elevation_at(art_x, art_z)?;
+        session_artisan.sim.player.position = Vec3Fixed::new(art_x, art_y, art_z);
+        session_artisan.sim.player.combat.active_weapon = WeaponFamily::Shield;
+
+        // Mutual Handshakes across all 3 nodes
+        let now = 1_700_000_000u64;
+
+        // Vanguard <-> Arcanist
+        let v_init_a = session_vanguard.peer_session.create_handshake_init([11u8; 32], now, NodeRole::VALIDATOR_FEDERATION, vec![1]);
+        let a_resp_v = session_arcanist.peer_session.handle_handshake_init(&v_init_a, [12u8; 32], now).unwrap();
+        let v_ack_a = session_vanguard.peer_session.handle_handshake_resp(&a_resp_v, now).unwrap();
+        session_arcanist.peer_session.handle_handshake_ack(&v_ack_a).unwrap();
+
+        // Arcanist <-> Artisan
+        let mut a_to_art = session_arcanist.peer_session.clone();
+        a_to_art.state = aeviterra_core::network::SessionState::Unauthenticated;
+        let a_init_art = a_to_art.create_handshake_init([21u8; 32], now, NodeRole::VALIDATOR_FEDERATION, vec![1]);
+        let art_resp_a = session_artisan.peer_session.handle_handshake_init(&a_init_art, [22u8; 32], now).unwrap();
+        let _ = a_to_art.handle_handshake_resp(&art_resp_a, now).unwrap();
+
+        // Mesh Gossip Subscriptions
+        let shard_topic = GossipTopic::Shard(1);
+        let halo_topic = GossipTopic::Halo { chunk_x: 64, chunk_z: 64 };
+
+        for topic in &[shard_topic, halo_topic] {
+            session_vanguard.router.subscribe_peer(session_arcanist.node_id, topic.clone());
+            session_vanguard.router.subscribe_peer(session_artisan.node_id, topic.clone());
+
+            session_arcanist.router.subscribe_peer(session_vanguard.node_id, topic.clone());
+            session_arcanist.router.subscribe_peer(session_artisan.node_id, topic.clone());
+
+            session_artisan.router.subscribe_peer(session_vanguard.node_id, topic.clone());
+            session_artisan.router.subscribe_peer(session_arcanist.node_id, topic.clone());
+        }
+
+        let net = SimulatedNetwork::new(1, 999);
+
+        Ok(Self {
+            world_id,
+            session_vanguard,
+            session_arcanist,
+            session_artisan,
+            net,
+            current_tick: 0,
+        })
+    }
+
+    /// Step simulation for all 3 agents by one tick, exchanging P2P packets.
+    pub fn step_tick(&mut self) -> Result<(), MathError> {
+        self.current_tick += 1;
+
+        self.session_vanguard.sim.step(vec![])?;
+        self.session_arcanist.sim.step(vec![])?;
+        self.session_artisan.sim.step(vec![])?;
+
+        let delivered = self.net.step();
+        for (sender, receiver, frame) in delivered {
+            let msg = aeviterra_core::network::GossipMessage {
+                message_id: [0u8; 32],
+                topic: GossipTopic::Shard(1),
+                origin: sender,
+                hop_count: 0,
+                payload: frame.payload,
+            };
+
+            if receiver == self.session_vanguard.node_id {
+                let _ = self.session_vanguard.router.handle_incoming(sender, GossipWireProtocol::DirectPush(msg));
+            } else if receiver == self.session_arcanist.node_id {
+                let _ = self.session_arcanist.router.handle_incoming(sender, GossipWireProtocol::DirectPush(msg));
+            } else if receiver == self.session_artisan.node_id {
+                let _ = self.session_artisan.router.handle_incoming(sender, GossipWireProtocol::DirectPush(msg));
+            }
+        }
+
+        Ok(())
+    }
+}
