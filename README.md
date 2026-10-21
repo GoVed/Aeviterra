@@ -1,7 +1,7 @@
 # Aeviterra — Century-Scale Decentralized MMO Engine
 
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/Tests-32%2F32_Passing-brightgreen.svg)](#verification--test-suite)
+[![Tests](https://img.shields.io/badge/Tests-42%2F42_Passing-brightgreen.svg)](#verification--test-suite)
 [![Clippy](https://img.shields.io/badge/Clippy-Zero_Warnings-blue.svg)](#verification--test-suite)
 [![Specification](https://img.shields.io/badge/Spec-Revision_4-purple.svg)](SPECIFICATION.md)
 [![License](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](#license)
@@ -39,8 +39,11 @@ aeviterra/
     ├── src/
     │   ├── terrain.rs          # 32-byte Genesis Seed procedural terrain & deterministic veins
     │   ├── simulation.rs       # 20 TPS deterministic state transition loop & SMT roots
+    │   ├── multiplayer.rs      # Peered dual-session P2P game node & live packet routing
     │   └── main.rs             # Interactive terminal MMO client & TPS benchmark runner
-    └── tests/playability_tests.rs # 6 end-to-end gameplay & determinism tests
+    └── tests/
+        ├── playability_tests.rs       # 6 end-to-end gameplay & determinism tests
+        └── adversarial_two_sessions.rs # 10 dual-session P2P break-test scenarios
 ```
 
 ---
@@ -70,7 +73,7 @@ Every subsystem in `aeviterra-core` and `aeviterra-cli` implements mathematicall
 The workspace is rigorously verified with automated security invariant tests and end-to-end playability scenarios:
 
 ```bash
-# Run all 32 unit, security, p2p, and gameplay integration tests
+# Run all 42 unit, security, p2p, and gameplay integration tests
 cargo test --workspace
 
 # Run Clippy with zero warnings permitted
@@ -78,6 +81,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 # Launch the interactive Stage 0 Playable Simulation CLI
 cargo run -p aeviterra-cli
+
+# Run dual-session P2P simulation & adversarial break-tests
+cargo run -p aeviterra-cli -- --two-sessions
 
 # Run deterministic benchmark simulation (10,000 ticks)
 cargo run -p aeviterra-cli -- --benchmark --ticks 10000
