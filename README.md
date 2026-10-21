@@ -1,7 +1,7 @@
 # Aeviterra — Century-Scale Decentralized MMO Engine
 
 [![Rust 2024](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
-[![Tests](https://img.shields.io/badge/Tests-25%2F25_Passing-brightgreen.svg)](#verification--test-suite)
+[![Tests](https://img.shields.io/badge/Tests-32%2F32_Passing-brightgreen.svg)](#verification--test-suite)
 [![Clippy](https://img.shields.io/badge/Clippy-Zero_Warnings-blue.svg)](#verification--test-suite)
 [![Specification](https://img.shields.io/badge/Spec-Revision_4-purple.svg)](SPECIFICATION.md)
 [![License](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue.svg)](#license)
@@ -30,10 +30,11 @@ aeviterra/
 │   │   ├── assets/grammar.rs   # Semantic generative asset grammar tokens
 │   │   ├── economy/            # Conserved mass ledger, agent capability envelopes & demurrage
 │   │   ├── storage/erasure.rs  # Authenticated MDS Cauchy Reed-Solomon coding over GF(2^8)
-│   │   ├── network/framing.rs  # Bounded wire framing & time-locked combat mempool
+│   │   ├── network/            # Streaming codec, mutual handshake, DRR scheduler, topic gossip, peer reputation & discrete simulator
 │   │   ├── governance/fpeg.rs  # Formalized Protocol Epoch Gates (FPEG) & cryptosystem migration
 │   │   └── game/               # Classless combat, CC diminishing returns, pity & settlements
-│   └── tests/security_tests.rs # 19 adversarial security & invariant tests
+│   ├── tests/security_tests.rs    # 19 adversarial security & invariant tests
+│   └── tests/p2p_network_tests.rs # 7 P2P networking & transport simulation tests
 └── aeviterra-cli/              # Stage 0 Playable Simulation CLI
     ├── src/
     │   ├── terrain.rs          # 32-byte Genesis Seed procedural terrain & deterministic veins
@@ -58,7 +59,7 @@ Every subsystem in `aeviterra-core` and `aeviterra-cli` implements mathematicall
 | **Offline Leases & Grace Barrier** | Deterministic single-use nullifiers derived from lease tokens, single active lease enforcement per actor, zero-knowledge receipt verification, and a 200-tick Reclamation Grace Barrier eliminating expiry race conditions. | [`offline/lease.rs`](aeviterra-core/src/offline/lease.rs) |
 | **Threshold Beacon RNG** | Irrevocable action-cost commitment prior to beacon emission, write-once round ingestion, and unbiased SHA-256 counter-mode rejection sampling over `[0, 1_000_000)`. | [`randomness/beacon.rs`](aeviterra-core/src/randomness/beacon.rs) |
 | **Authenticated $\text{GF}(2^8)$ Erasure Coding** | Systematic MDS Cauchy Reed-Solomon coding over $\text{GF}(2^8)$ using Gauss-Jordan matrix inversion (reconstructs from *any* $K$ distinct source or repair fragments), symbol deduplication, and SHA-256 root integrity commitments. | [`storage/erasure.rs`](aeviterra-core/src/storage/erasure.rs) |
-| **Wire Framing & Time-Locked Mempool** | Pre-allocation 64 KB frame ceiling, rejection of truncated and trailing bytes, and counter-mode authenticated time-locked commitments preventing front-running of combat intents. | [`network/framing.rs`](aeviterra-core/src/network/framing.rs) |
+| **P2P Networking & Wire Framing** | Bounded streaming codec (`StreamingFrameCodec`) with CRC32/Sha256 checksums, mutual challenge-response handshake with `/16` subnet eclipse protection, Deficit Round-Robin multi-queue scheduler (Consensus 40%, Control 25%, Gameplay 20%, Audit 10%, Recovery 5% floor) with consensus preemption, topic gossip with `IHAVE`/`IWANT` deduplication, and automated peer reputation quarantine. | [`network/`](aeviterra-core/src/network) |
 | **Thermodynamics & Demurrage** | Strict conservation of atomic micro-unit mass ledger (`input == output + residue`), bounded capability envelopes for AI/autonomous agents, and continuous demurrage decay on dormant sovereign vaults. | [`economy/thermodynamics.rs`](aeviterra-core/src/economy/thermodynamics.rs) |
 | **Playable Combat & Economy** | Stamina-gated active combat with invulnerability frames and crowd-control diminishing returns, tier-isolated drop pity counters, single-use quest completion nullifiers, and 30-day municipal tenure governance. | [`game/`](aeviterra-core/src/game) |
 
@@ -69,7 +70,7 @@ Every subsystem in `aeviterra-core` and `aeviterra-cli` implements mathematicall
 The workspace is rigorously verified with automated security invariant tests and end-to-end playability scenarios:
 
 ```bash
-# Run all 25 unit, security, and gameplay integration tests
+# Run all 32 unit, security, p2p, and gameplay integration tests
 cargo test --workspace
 
 # Run Clippy with zero warnings permitted

@@ -126,10 +126,14 @@ Clients render photorealistic geometry procedurally from verified grammar rules.
 - Reconstruction succeeds from *any* $K$ distinct valid symbols (source or repair) via Gauss-Jordan elimination.
 - Manifests fix object hash, length, symbol size, and per-symbol SHA-256 commitments, rejecting duplicate or tampered symbols prior to decode.
 
-### 12. Bounded Wire Framing & Time-Locked Mempool
+### 12. P2P Networking, Streaming Framing & Multi-Queue Scheduling
 
-- Wire framing enforces a 64 KB pre-allocation packet ceiling, verified 7-byte header (`AEVI` magic, version, priority channel), and rejection of trailing bytes.
-- Combat action intents are sealed under a counter-mode threshold keystream bound to `(threshold_key, target_block_height, actor_id, session_epoch)` with cryptographic commitment verification, eliminating front-running and MEV.
+- **Streaming Wire Codec**: Enforces a 64 KB pre-allocation frame ceiling, verified 7-byte header (`AEVI` magic, version, priority queue), 4-byte transport integrity checksum, and bounded accumulator buffers to prevent slowloris holding.
+- **Mutual Handshake & Eclipse Defense**: Challenge-response mutual authentication binding `world_id`, session nonces, and `NodeId` with $\le 30\text{s}$ timestamp drift enforcement; address books partition peers into `/16` subnets with an outbound diversity constraint of $\ge 6$ distinct subnets and reserved validator seats.
+- **Deficit Round-Robin Multi-Queue Scheduler**: Guarantees bandwidth allocations across 5 priority queues (`Consensus` 40%, `Control` 25%, `Gameplay` 20%, `Audit` 10%, `Recovery` 5% guaranteed floor), eliminating state catchup deadlocks while preempting immediately for BFT consensus latency deadlines.
+- **Dynamic Swept-Halo GossipSub**: Topic-partitioned gossip (`aeviterra/consensus`, `aeviterra/shard`, `aeviterra/halo/{x}_{z}`) with `IHAVE`/`IWANT` metadata exchange for payloads $>1\text{ KB}$ and two-tier deduplication caches defeating broadcast loops.
+- **Peer Reputation Ledger**: Multi-factor scoring ($S \in [-10000, +1000]$) with exponential half-life decay, progressive throttling/quarantine, and instant permaban with escalating subnet bans for equivocation.
+- **Time-Locked Mempool**: Combat action intents are sealed under a counter-mode threshold keystream bound to `(threshold_key, target_block_height, actor_id, session_epoch)` with cryptographic commitment verification, eliminating front-running and MEV.
 
 ### 13. Formalized Protocol Epoch Gates (FPEG)
 
@@ -168,6 +172,15 @@ test test_thermodynamic_mass_conservation_and_agent_budget ... ok
 test test_tier_compartmentalized_pity_system ... ok
 test test_v4_nullifier_immune_to_differing_end_roots ... ok
 
+running 7 tests (aeviterra-core/tests/p2p_network_tests.rs)
+test test_address_book_subnet_diversity_and_eclipse_defense ... ok
+test test_gossip_pubsub_deduplication_and_ihave_iwant ... ok
+test test_multi_queue_scheduler_anti_starvation_and_preemption ... ok
+test test_peer_handshake_mutual_auth_and_replay ... ok
+test test_peer_reputation_quarantine_and_ban ... ok
+test test_simulated_network_latency_partition_and_heal ... ok
+test test_streaming_codec_fragmentation_and_checksum ... ok
+
 running 6 tests (aeviterra-cli/tests/playability_tests.rs)
 test test_p01_combat_balance_ttk_stamina_and_iframes ... ok
 test test_p02_gathering_depletion_and_damascus_forging ... ok
@@ -176,7 +189,7 @@ test test_p04_settlement_plot_claiming_and_modular_construction ... ok
 test test_p05_idempotent_quests_and_consumed_once_reward_claims ... ok
 test test_p06_high_throughput_deterministic_simulation_pacing ... ok
 
-test result: ok. 25 passed; 0 failed; 0 ignored; finished in 0.67s
+test result: ok. 32 passed; 0 failed; 0 ignored; finished in 0.72s
 ```
 
 ---
