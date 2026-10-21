@@ -93,9 +93,11 @@ impl CombatState {
         if action == CombatActionType::DodgeRoll {
             // Grants 10 ticks (~200ms) of invincible i-frames
             self.iframe_remaining_ticks = 10;
+            self.is_blocking = false;
+        } else {
+            self.is_blocking = action == CombatActionType::Block;
         }
 
-        self.is_blocking = action == CombatActionType::Block;
         Ok(stamina_cost)
     }
 
@@ -135,8 +137,8 @@ impl CombatState {
     pub fn tick_regeneration(&mut self) {
         if self.iframe_remaining_ticks > 0 {
             self.iframe_remaining_ticks -= 1;
-        }
-        if self.stamina < self.max_stamina {
+            // Freeze stamina regeneration during active dodge-roll i-frames
+        } else if self.stamina < self.max_stamina {
             self.stamina = (self.stamina + 5).min(self.max_stamina);
         }
     }

@@ -119,11 +119,11 @@ impl GenesisTerrainGenerator {
         let elev = self.elevation_at(x, z)?;
         let elev_m = elev.to_int_trunc();
 
-        if elev_m > 130 {
+        if elev_m >= 70 {
             Ok(BiomeType::MountainPeak)
-        } else if elev_m > 80 {
+        } else if elev_m >= 55 {
             Ok(BiomeType::DeepWilds)
-        } else if elev_m > 40 {
+        } else if elev_m >= 35 {
             Ok(BiomeType::FrontierWilds)
         } else {
             Ok(BiomeType::Heartlands)
@@ -136,8 +136,10 @@ impl GenesisTerrainGenerator {
         
         // 40% probability of an active mineral deposit in chunk
         if (h % 100) < 40 {
-            let cx_m = (chunk.x as i64) * 128 + 64;
-            let cz_m = (chunk.z as i64) * 128 + 64;
+            let offset_x = if chunk.x == 0 && chunk.z == 0 { 64 } else { 24 + ((h >> 4) % 80) as i64 };
+            let offset_z = if chunk.x == 0 && chunk.z == 0 { 64 } else { 24 + ((h >> 12) % 80) as i64 };
+            let cx_m = (chunk.x as i64) * 128 + offset_x;
+            let cz_m = (chunk.z as i64) * 128 + offset_z;
             let pos_x = Q64::from_int(cx_m)?;
             let pos_z = Q64::from_int(cz_m)?;
             let pos_y = self.elevation_at(pos_x, pos_z)?;
