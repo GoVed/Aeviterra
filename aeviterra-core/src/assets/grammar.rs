@@ -80,6 +80,9 @@ pub struct EquipmentGrammar {
     pub heraldry: Option<HeraldryToken>,
 }
 
+pub const VALID_STRUCTURAL_FEATURES_MASK: u32 = 0b111; // Bitflags: 1=crenellations, 2=arrow slits, 4=buttresses
+pub const MAX_SLENDERNESS_RATIO: i64 = 32; // Max height-to-thickness ratio before structural buckling
+
 impl StructuralPrimitive {
     /// Validates that physical structural constraints conform to simulation physics.
     pub fn validate_constraints(&self) -> bool {
@@ -94,6 +97,19 @@ impl StructuralPrimitive {
             return false;
         }
         if self.thickness < Q64::HALF || self.thickness > Q64::from_int(8).unwrap() {
+            return false;
+        }
+        // Reject unallocated feature bitflags (prevents covert bitflag smuggling)
+        if self.features & !VALID_STRUCTURAL_FEATURES_MASK != 0 {
+            return false;
+        }
+        // Enforce structural slenderness ratio (height <= thickness * 32 AND length <= thickness * 32)
+        // to prevent paper-thin 64m buckling walls and unsupported 128:1 horizontal beams (E18 & R2-07)
+        let max_supported_span = match self.thickness.checked_mul(Q64::from_int(MAX_SLENDERNESS_RATIO).unwrap()) {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        if self.height > max_supported_span || self.length > max_supported_span {
             return false;
         }
         true

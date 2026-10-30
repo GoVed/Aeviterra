@@ -284,6 +284,10 @@ impl WorldSimulation {
             }
         }
 
+        // E01 Remediation: Enforce at most one combat action per tick to prevent
+        // single-tick multi-attack burst exploits and zero-recovery animation cancels.
+        let mut combat_action_executed_this_tick = false;
+
         for intent in intents {
             match intent {
                 PlayerIntent::Move { .. } => {
@@ -291,7 +295,11 @@ impl WorldSimulation {
                 }
 
                 PlayerIntent::Attack(action) => {
+                    if combat_action_executed_this_tick {
+                        continue;
+                    }
                     if let Ok(stamina_cost) = self.player.combat.execute_action(action) {
+                        combat_action_executed_this_tick = true;
                         events.push(GameEvent::CombatActionExecuted {
                             actor_id: self.player.entity_id,
                             action,
@@ -300,6 +308,10 @@ impl WorldSimulation {
 
                         // Defensive actions (Block, DodgeRoll) do NOT emit hit sweep (B15)
                         if action != CombatActionType::Block && action != CombatActionType::DodgeRoll {
+                            let is_ranged = matches!(
+                                self.player.combat.active_weapon,
+                                WeaponFamily::Bow | WeaponFamily::WandPrism | WeaponFamily::Staff
+                            );
                             let attack_range = match self.player.combat.active_weapon {
                                 WeaponFamily::Bow => Q64::from_int(18)?,
                                 WeaponFamily::WandPrism => Q64::from_int(14)?,
@@ -308,9 +320,10 @@ impl WorldSimulation {
                                 _ => Q64::from_int(4)?,
                             };
 
-                            let bonus_pct: u32 = match self.player.equipped_weapon_item {
-                                Some(101) => 40, // Damascus Broadsword: +40%
-                                Some(102) => 30, // Composite Bow: +30%
+                            // E02 Remediation: Verify equipped weapon item matches active WeaponFamily
+                            let bonus_pct: u32 = match (self.player.equipped_weapon_item, self.player.combat.active_weapon) {
+                                (Some(101), WeaponFamily::Blade) => 40, // Damascus Broadsword: +40% (Blade only)
+                                (Some(102), WeaponFamily::Bow) => 30,   // Composite Bow: +30% (Bow only)
                                 _ => 0,
                             };
 
@@ -334,9 +347,50 @@ impl WorldSimulation {
                             let mut hits = Vec::new();
                             for (&npc_id, npc) in &self.npcs {
                                 if npc.combat.health > 0 {
-                                    let dist = self.player.position.distance(npc.position)?;
-                                    if dist <= attack_range {
-                                        hits.push((npc_id, scaled_dmg));
+                                    let dist_3d = self.player.position.distance(npc.position)?;
+                                    let p_flat = Vec3Fixed::new(self.player.position.x, Q64::ZERO, self.player.position.z);
+                                    let n_flat = Vec3Fixed::new(npc.position.x, Q64::ZERO, npc.position.z);
+                                    let dist_xz = p_flat.distance(n_flat)?;
+
+                                    // E05 & R2-04 Remediation: High-ground downhill shots check horizontal range + max 40m drop;
+                                    // moderate uphill shots check horizontal range + max 20m climb;
+                                    // ranged attacks also verify multi-point (25%, 50%, 75%) terrain line-of-sight occlusion.
+                                    let elevation_envelope_valid = is_ranged
+                                        && dist_xz <= attack_range
+                                        && if self.player.position.y >= npc.position.y {
+                                            (self.player.position.y.checked_sub(npc.position.y)?) <= Q64::from_int(40)?
+                                        } else {
+                                            (npc.position.y.checked_sub(self.player.position.y)?) <= Q64::from_int(20)?
+                                        };
+
+                                    if dist_3d <= attack_range || elevation_envelope_valid {
+                                        let mut occluded = false;
+                                        if is_ranged && dist_xz > Q64::from_int(4)? {
+                                            let four = Q64::from_int(4)?;
+                                            let clearance = Q64::from_raw(Q64::ONE_RAW * 3 / 2); // 1.5m eye clearance
+                                            for step_num in 1..=3 {
+                                                let w_npc = Q64::from_int(step_num)?;
+                                                let w_plr = Q64::from_int(4 - step_num)?;
+                                                let sample_x = self.player.position.x.checked_mul(w_plr)?
+                                                    .checked_add(npc.position.x.checked_mul(w_npc)?)?
+                                                    .checked_div(four)?;
+                                                let sample_z = self.player.position.z.checked_mul(w_plr)?
+                                                    .checked_add(npc.position.z.checked_mul(w_npc)?)?
+                                                    .checked_div(four)?;
+                                                let sample_terrain_y = self.terrain.elevation_at(sample_x, sample_z)?;
+                                                let los_y = self.player.position.y.checked_mul(w_plr)?
+                                                    .checked_add(npc.position.y.checked_mul(w_npc)?)?
+                                                    .checked_div(four)?;
+                                                if sample_terrain_y > los_y.checked_add(clearance)? {
+                                                    occluded = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+
+                                        if !occluded {
+                                            hits.push((npc_id, scaled_dmg));
+                                        }
                                     }
                                 }
                             }
@@ -345,6 +399,10 @@ impl WorldSimulation {
                                 if let Some(npc) = self.npcs.get_mut(&npc_id) {
                                     let prev_hp = npc.combat.health;
                                     let effective_dmg = npc.combat.apply_incoming_damage(dmg);
+                                    // E04 Remediation: Provoke damaged NPC to expand pursuit radius for 200 ticks
+                                    if effective_dmg > 0 && npc.combat.health > 0 {
+                                        npc.combat.provoked_ticks = 200;
+                                    }
                                     events.push(GameEvent::CombatDamageDealt {
                                         attacker: self.player.entity_id,
                                         target: npc_id,
@@ -384,11 +442,26 @@ impl WorldSimulation {
 
                 PlayerIntent::SwitchWeapon(family) => {
                     self.player.combat.active_weapon = family;
+                    // E02 Remediation: Unequip weapon item if it does not match the new WeaponFamily
+                    let matches_family = matches!(
+                        (self.player.equipped_weapon_item, family),
+                        (Some(101), WeaponFamily::Blade)
+                            | (Some(102), WeaponFamily::Bow)
+                            | (Some(103), WeaponFamily::Shield)
+                    );
+                    if !matches_family {
+                        self.player.equipped_weapon_item = None;
+                    }
                 }
 
                 PlayerIntent::EquipItem(item_id) => {
+                    if combat_action_executed_this_tick {
+                        continue;
+                    }
                     let count = self.player.inventory.get(&item_id).copied().unwrap_or(0);
                     if count > 0 {
+                        // R2-02 Remediation: Equipping a weapon consumes the tick's combat action slot
+                        combat_action_executed_this_tick = true;
                         self.player.equipped_weapon_item = Some(item_id);
                         let name = match item_id {
                             101 => {
@@ -450,24 +523,24 @@ impl WorldSimulation {
                     self.player.combat.is_blocking = false;
                     let iron_count = self.player.inventory.get(&1).copied().unwrap_or(0);
                     if iron_count >= 50 {
-                        // Exact closed recipe: 50 Iron Ore -> 35 Damascus Steel Sword + 15 Slag
-                        *self.player.inventory.get_mut(&1).unwrap() -= 50;
-                        *self.player.inventory.entry(101).or_insert(0) += 1; // 101 = Damascus Broadsword
-
-                        let _ = self.thermodynamic_ledger.execute_recipe(
+                        // E10 Remediation: Execute closed thermodynamic recipe atomically first
+                        if self.thermodynamic_ledger.execute_recipe(
                             self.player.entity_id,
-                            1,  // input iron
+                            1,   // input iron
                             50,
                             101, // output sword
                             35,
                             999, // residue slag
                             15,
-                        );
+                        ).is_ok() {
+                            *self.player.inventory.get_mut(&1).unwrap() -= 50;
+                            *self.player.inventory.entry(101).or_insert(0) += 1;
 
-                        events.push(GameEvent::ItemCrafted {
-                            crafter_id: self.player.entity_id,
-                            item_name: "Masterwork Damascus Broadsword",
-                        });
+                            events.push(GameEvent::ItemCrafted {
+                                crafter_id: self.player.entity_id,
+                                item_name: "Masterwork Damascus Broadsword",
+                            });
+                        }
                     }
                 }
 
@@ -475,24 +548,24 @@ impl WorldSimulation {
                     self.player.combat.is_blocking = false;
                     let timber_count = self.player.inventory.get(&2).copied().unwrap_or(0);
                     if timber_count >= 30 {
-                        // Closed recipe: 30 Oak Timber -> 20 Composite Bow + 10 Wood Shavings Slag
-                        *self.player.inventory.get_mut(&2).unwrap() -= 30;
-                        *self.player.inventory.entry(102).or_insert(0) += 1;
-
-                        let _ = self.thermodynamic_ledger.execute_recipe(
+                        // E10 Remediation: Execute closed thermodynamic recipe atomically first
+                        if self.thermodynamic_ledger.execute_recipe(
                             self.player.entity_id,
-                            2,  // input timber
+                            2,   // input timber
                             30,
                             102, // output bow
                             20,
                             999, // residue slag
                             10,
-                        );
+                        ).is_ok() {
+                            *self.player.inventory.get_mut(&2).unwrap() -= 30;
+                            *self.player.inventory.entry(102).or_insert(0) += 1;
 
-                        events.push(GameEvent::ItemCrafted {
-                            crafter_id: self.player.entity_id,
-                            item_name: "Composite Recurve Bow",
-                        });
+                            events.push(GameEvent::ItemCrafted {
+                                crafter_id: self.player.entity_id,
+                                item_name: "Composite Recurve Bow",
+                            });
+                        }
                     }
                 }
 
@@ -500,12 +573,20 @@ impl WorldSimulation {
                     self.player.combat.is_blocking = false;
                     let iron_count = self.player.inventory.get(&1).copied().unwrap_or(0);
                     let timber_count = self.player.inventory.get(&2).copied().unwrap_or(0);
-                    if iron_count >= 20 && timber_count >= 20 {
-                        *self.player.inventory.get_mut(&1).unwrap() -= 20;
-                        *self.player.inventory.get_mut(&2).unwrap() -= 20;
-                        *self.player.inventory.entry(103).or_insert(0) += 1;
+                    let ledger_iron = self.thermodynamic_ledger.get_balance(self.player.entity_id, 1);
+                    let ledger_timber = self.thermodynamic_ledger.get_balance(self.player.entity_id, 2);
+                    let ledger_shield = self.thermodynamic_ledger.get_balance(self.player.entity_id, 103);
+                    let ledger_slag = self.thermodynamic_ledger.world_sinks.get(&999).copied().unwrap_or(0);
 
-                        let _ = self.thermodynamic_ledger.execute_recipe(
+                    // E10 Remediation: All-or-nothing pre-validation across both reagents & outputs
+                    if iron_count >= 20
+                        && timber_count >= 20
+                        && ledger_iron >= 20
+                        && ledger_timber >= 20
+                        && ledger_shield.checked_add(30).is_some()
+                        && ledger_slag.checked_add(10).is_some()
+                    {
+                        let r1 = self.thermodynamic_ledger.execute_recipe(
                             self.player.entity_id,
                             1,
                             20,
@@ -514,7 +595,7 @@ impl WorldSimulation {
                             999,
                             5,
                         );
-                        let _ = self.thermodynamic_ledger.execute_recipe(
+                        let r2 = self.thermodynamic_ledger.execute_recipe(
                             self.player.entity_id,
                             2,
                             20,
@@ -523,11 +604,16 @@ impl WorldSimulation {
                             999,
                             5,
                         );
+                        if r1.is_ok() && r2.is_ok() {
+                            *self.player.inventory.get_mut(&1).unwrap() -= 20;
+                            *self.player.inventory.get_mut(&2).unwrap() -= 20;
+                            *self.player.inventory.entry(103).or_insert(0) += 1;
 
-                        events.push(GameEvent::ItemCrafted {
-                            crafter_id: self.player.entity_id,
-                            item_name: "Sturdy Kite Shield",
-                        });
+                            events.push(GameEvent::ItemCrafted {
+                                crafter_id: self.player.entity_id,
+                                item_name: "Sturdy Kite Shield",
+                            });
+                        }
                     }
                 }
             }
@@ -540,7 +626,11 @@ impl WorldSimulation {
         for npc in self.npcs.values_mut() {
             if npc.combat.health > 0 && npc.is_hostile {
                 let dist = npc.position.distance(player_pos)?;
-                let aggro_radius = Q64::from_int(12)?; // 12m aggro
+                let is_provoked = npc.combat.provoked_ticks > 0;
+                if is_provoked {
+                    npc.combat.provoked_ticks -= 1;
+                }
+                let aggro_radius = Q64::from_int(12)?; // 12m unprovoked aggro
                 let attack_radius = Q64::from_int(3)?; // 3m bite
 
                 if player_is_alive && dist <= attack_radius {
@@ -553,8 +643,9 @@ impl WorldSimulation {
                         damage: dmg,
                         target_health: self.player.combat.health,
                     });
-                } else if player_is_alive && dist <= aggro_radius {
-                    // Move toward living player
+                } else if player_is_alive && (dist <= aggro_radius || is_provoked) {
+                    // R2-03 Remediation: Provoked NPCs relentlessly pursue for the full 200-tick provocation window
+                    // without freezing at a 30m leash boundary!
                     let dir = player_pos.checked_sub(npc.position)?.normalize()?;
                     let step_speed = Q64::from_int(2)?; // 2 m/s
                     let step_x = dir.x.checked_mul(step_speed)?;

@@ -72,27 +72,34 @@ impl QuestEngine {
             completed: false,
         });
 
-        if !progress.completed {
-            progress.current_count += 1;
-            if progress.current_count >= tmpl.target_count {
-                progress.completed = true;
-            }
+        progress.current_count = progress.current_count.saturating_add(1);
+        if progress.current_count >= tmpl.target_count {
+            progress.completed = true;
         }
     }
 
-    /// Claim quest reward. Enforces single-use nullifier to prevent double-claim / double-loot.
+    /// Claim quest reward for step 1. Enforces single-use nullifier to prevent double-claim / double-loot.
     pub fn claim_reward(&mut self, actor_id: u64, quest_id: u32) -> Result<(u64, u64), QuestError> {
+        self.claim_reward_step(actor_id, quest_id, 1)
+    }
+
+    /// Claim quest reward for a specific multi-stage quest step.
+    pub fn claim_reward_step(&mut self, actor_id: u64, quest_id: u32, step: u32) -> Result<(u64, u64), QuestError> {
+        if step == 0 {
+            return Err(QuestError::NotCompleted);
+        }
         let progress = self.player_progress.get(&(actor_id, quest_id)).ok_or(QuestError::QuestNotFound)?;
-        if !progress.completed {
+        let tmpl = self.templates.get(&quest_id).ok_or(QuestError::QuestNotFound)?;
+        let required_count = tmpl.target_count.saturating_mul(step);
+        if !progress.completed || progress.current_count < required_count {
             return Err(QuestError::NotCompleted);
         }
 
-        let nullifier = compute_quest_claim_nullifier(actor_id, quest_id, 1);
+        let nullifier = compute_quest_claim_nullifier(actor_id, quest_id, step);
         if self.consumed_claims.contains(&nullifier) {
             return Err(QuestError::RewardAlreadyClaimed);
         }
 
-        let tmpl = self.templates.get(&quest_id).ok_or(QuestError::QuestNotFound)?;
         let rewards = (tmpl.reward_marks, tmpl.reward_sovereigns);
 
         self.consumed_claims.insert(nullifier);

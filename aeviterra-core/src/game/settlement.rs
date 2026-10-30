@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 pub const MIN_TENURE_TICKS: u64 = 518_400; // ~30 days at 20 ticks/sec
 pub const MIN_TAX_BOND_MARKS: u64 = 100;
+pub const MAX_STRUCTURES_PER_PLOT: usize = 32;
+pub const MAX_PLOTS_PER_RESIDENT: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomesteadPlot {
@@ -37,6 +39,8 @@ pub enum SettlementError {
     PlotNotFound,
     NotPlotOwner,
     InvalidStructureConstraints,
+    PlotCapacityExceeded,
+    ResidentPlotLimitExceeded,
     SybilVotingDisqualified,
     InsufficientTenure,
     InsufficientTreasuryFunds,
@@ -55,10 +59,15 @@ impl SettlementCharter {
         }
     }
 
-    /// Claim homestead plot (V4 §10, housing is a guaranteed right).
+    /// Claim homestead plot (V4 §10, housing is a guaranteed right, bounded per resident to prevent land monopoly).
     pub fn claim_plot(&mut self, plot_id: u64, owner_id: u64, current_tick: u64) -> Result<(), SettlementError> {
         if self.plots.contains_key(&plot_id) {
             return Err(SettlementError::PlotAlreadyClaimed);
+        }
+
+        let owned_count = self.plots.values().filter(|p| p.owner_id == owner_id).count();
+        if owned_count >= MAX_PLOTS_PER_RESIDENT {
+            return Err(SettlementError::ResidentPlotLimitExceeded);
         }
 
         let plot = HomesteadPlot {
@@ -85,6 +94,9 @@ impl SettlementCharter {
         if plot.owner_id != owner_id {
             return Err(SettlementError::NotPlotOwner);
         }
+        if plot.built_structures.len() >= MAX_STRUCTURES_PER_PLOT {
+            return Err(SettlementError::PlotCapacityExceeded);
+        }
         if !structure.validate_constraints() {
             return Err(SettlementError::InvalidStructureConstraints);
         }
@@ -99,7 +111,8 @@ impl SettlementCharter {
     pub fn can_vote_for_mayor(&self, actor_id: u64, current_tick: u64) -> Result<bool, SettlementError> {
         let resident = self.residents.get(&actor_id).ok_or(SettlementError::SybilVotingDisqualified)?;
 
-        if current_tick < resident.registration_tick + MIN_TENURE_TICKS {
+        // R2-06 Remediation: Use saturating_sub to prevent u64 overflow when registration_tick is near u64::MAX
+        if current_tick.saturating_sub(resident.registration_tick) < MIN_TENURE_TICKS {
             return Err(SettlementError::InsufficientTenure);
         }
         if resident.cumulative_taxes_paid < MIN_TAX_BOND_MARKS {
@@ -113,10 +126,13 @@ impl SettlementCharter {
     /// Updates the resident's cumulative tax record and the municipal treasury balance.
     pub fn pay_tax(&mut self, actor_id: u64, amount: u64) -> Result<(), SettlementError> {
         let resident = self.residents.get_mut(&actor_id).ok_or(SettlementError::SybilVotingDisqualified)?;
-        resident.cumulative_taxes_paid = resident.cumulative_taxes_paid.checked_add(amount)
+        // R2-05 Remediation: Validate both additions before mutating state to ensure 100% atomicity
+        let new_resident_tax = resident.cumulative_taxes_paid.checked_add(amount)
             .ok_or(SettlementError::TaxCalculationOverflow)?;
-        self.treasury_marks = self.treasury_marks.checked_add(amount)
+        let new_treasury = self.treasury_marks.checked_add(amount)
             .ok_or(SettlementError::TaxCalculationOverflow)?;
+        resident.cumulative_taxes_paid = new_resident_tax;
+        self.treasury_marks = new_treasury;
         Ok(())
     }
 

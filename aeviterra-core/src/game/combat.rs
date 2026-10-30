@@ -42,6 +42,10 @@ pub struct CombatState {
     pub secondary_weapon: Option<WeaponFamily>,
     pub is_blocking: bool,
     pub iframe_remaining_ticks: u32,
+    #[serde(default)]
+    pub iframe_hits_this_tick: u32,
+    #[serde(default)]
+    pub provoked_ticks: u32,
     pub notoriety_score: u32,
 }
 
@@ -66,6 +70,8 @@ impl CombatState {
             secondary_weapon: None,
             is_blocking: false,
             iframe_remaining_ticks: 0,
+            iframe_hits_this_tick: 0,
+            provoked_ticks: 0,
             notoriety_score: 0,
         }
     }
@@ -93,6 +99,7 @@ impl CombatState {
         if action == CombatActionType::DodgeRoll {
             // Grants 10 ticks (~200ms) of invincible i-frames
             self.iframe_remaining_ticks = 10;
+            self.iframe_hits_this_tick = 0;
             self.is_blocking = false;
         } else {
             self.is_blocking = action == CombatActionType::Block;
@@ -102,14 +109,33 @@ impl CombatState {
     }
 
     /// Take incoming damage. Applies blocking mitigation and i-frame avoidance.
+    /// E03 Remediation: Caps full i-frame evasion to 2 simultaneous hits per tick;
+    /// 3+ simultaneous attackers in the same tick deal 50% poise-break chip damage.
     pub fn apply_incoming_damage(&mut self, raw_damage: u32) -> u32 {
         if self.iframe_remaining_ticks > 0 {
-            return 0; // Dodged via i-frames
+            self.iframe_hits_this_tick = self.iframe_hits_this_tick.saturating_add(1);
+            if self.iframe_hits_this_tick <= 2 {
+                return 0; // Dodged via i-frames
+            }
+            let chip_damage = raw_damage / 2;
+            if chip_damage >= self.health {
+                self.health = 0;
+            } else {
+                self.health -= chip_damage;
+            }
+            return chip_damage;
         }
 
         let effective_damage = if self.is_blocking {
-            // Blocking reduces damage by 70% (u64 intermediate avoids u32 overflow)
-            ((raw_damage as u64) * 30 / 100) as u32
+            if self.stamina == 0 {
+                // R2-01 Remediation: Guard Break when blocking with 0 stamina!
+                self.is_blocking = false;
+                raw_damage
+            } else {
+                // Blocking consumes 5 poise stamina per impact and mitigates 70% damage
+                self.stamina = self.stamina.saturating_sub(5);
+                ((raw_damage as u64) * 30 / 100) as u32
+            }
         } else {
             raw_damage
         };
@@ -135,10 +161,12 @@ impl CombatState {
     }
 
     pub fn tick_regeneration(&mut self) {
+        self.iframe_hits_this_tick = 0;
         if self.iframe_remaining_ticks > 0 {
             self.iframe_remaining_ticks -= 1;
             // Freeze stamina regeneration during active dodge-roll i-frames
-        } else if self.stamina < self.max_stamina {
+        } else if !self.is_blocking && self.stamina < self.max_stamina {
+            // R2-01 Remediation: Stamina only regenerates when not actively holding block posture
             self.stamina = (self.stamina + 5).min(self.max_stamina);
         }
     }

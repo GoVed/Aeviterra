@@ -107,7 +107,8 @@ pub enum ActionAdmissionError {
 }
 
 /// Replay & Sequence Deduplication Guard for Signed Action Envelopes (F17, T03, T08).
-/// Retains per-(actor_id, session_id) high-water marks so pruned tombstones never make old actions valid again.
+/// Retains per-(actor_id, session_id) high-water marks and a 64-bit RFC-6479 sliding anti-replay bitmap
+/// so pruned tombstones never make old actions valid again while tolerating out-of-order gossip jitter.
 #[derive(Debug, Clone)]
 pub struct ActionAdmissionVerifier {
     pub world_id: Hash,
@@ -115,6 +116,7 @@ pub struct ActionAdmissionVerifier {
     pub authority_shard: u32,
     pub max_tick_drift: u64,
     pub session_high_water_seq: BTreeMap<(u64, u64), u64>,
+    pub session_replay_window_mask: BTreeMap<(u64, u64), u64>,
 }
 
 impl ActionAdmissionVerifier {
@@ -125,6 +127,7 @@ impl ActionAdmissionVerifier {
             authority_shard,
             max_tick_drift,
             session_high_water_seq: BTreeMap::new(),
+            session_replay_window_mask: BTreeMap::new(),
         }
     }
 
@@ -153,14 +156,35 @@ impl ActionAdmissionVerifier {
 
         let session_key = (env.actor_id, env.session_id);
         let last_seq = self.session_high_water_seq.get(&session_key).copied().unwrap_or(0);
-        if env.sequence_num <= last_seq {
+        let mask = self.session_replay_window_mask.get(&session_key).copied().unwrap_or(0);
+
+        if env.sequence_num == 0 {
             return Err(ActionAdmissionError::StaleOrReplayedSequence {
                 expected_min: last_seq.saturating_add(1),
-                got: env.sequence_num,
+                got: 0,
             });
         }
 
-        self.session_high_water_seq.insert(session_key, env.sequence_num);
+        if env.sequence_num > last_seq {
+            let shift = env.sequence_num - last_seq;
+            let new_mask = if shift >= 64 {
+                1u64
+            } else {
+                (mask << shift) | 1u64
+            };
+            self.session_high_water_seq.insert(session_key, env.sequence_num);
+            self.session_replay_window_mask.insert(session_key, new_mask);
+        } else {
+            let offset = last_seq - env.sequence_num;
+            if offset >= 64 || (mask & (1u64 << offset)) != 0 {
+                return Err(ActionAdmissionError::StaleOrReplayedSequence {
+                    expected_min: last_seq.saturating_add(1),
+                    got: env.sequence_num,
+                });
+            }
+            self.session_replay_window_mask.insert(session_key, mask | (1u64 << offset));
+        }
+
         Ok(env.compute_signing_digest())
     }
 }
@@ -248,8 +272,7 @@ impl BftCommitCertificate {
         if unique_signers.len() != self.signers.len() {
             return false; // Reject duplicate signer IDs (T02)
         }
-        let f = (committee_size - 1) / 3;
-        let quorum_threshold = 2 * f + 1;
+        let quorum_threshold = (2 * committee_size) / 3 + 1;
         unique_signers.len() >= quorum_threshold
     }
 

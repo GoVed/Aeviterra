@@ -124,8 +124,9 @@ impl ShardBftEngine {
         let phase_votes = self.votes.entry(key).or_default();
         phase_votes.insert(vote.validator_id, (vote.clone(), sig));
 
-        let f = (self.committee_size - 1) / 3;
-        let quorum = 2 * f + 1;
+        // Strict supermajority quorum: Q = floor(2N / 3) + 1
+        // Prevents disjoint split-brain partitions when N is not of the form 3f + 1 (e.g. N=6 => Q=5)
+        let quorum = (2 * self.committee_size) / 3 + 1;
 
         if vote.phase == BftPhase::Commit {
             let matching_votes: Vec<(u64, Signature)> = phase_votes

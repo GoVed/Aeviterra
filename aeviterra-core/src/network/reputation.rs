@@ -116,10 +116,17 @@ impl PeerReputationLedger {
     }
 
     /// Query current status of peer.
+    /// Protects peers with proven positive reputation (`score > 0`) from collateral subnet-wide bans,
+    /// and properly resets `last_update_sec` and decays `infraction_count` upon ban expiration.
     pub fn peer_tier(&mut self, node_id: &NodeId, subnet_prefix: &str, now_sec: u64) -> PeerTier {
-        // 1. Check subnet-wide ban
-        if let Some(&banned_until) = self.subnet_bans.get(subnet_prefix)
-            && now_sec < banned_until {
+        let has_positive_standing = self.records.get(node_id)
+            .is_some_and(|r| r.score > 0 && r.banned_until_sec.is_none());
+
+        // 1. Check subnet-wide ban (exempting peers with established positive reputation)
+        if !has_positive_standing
+            && let Some(&banned_until) = self.subnet_bans.get(subnet_prefix)
+            && now_sec < banned_until
+        {
             return PeerTier::Banned;
         }
 
@@ -130,7 +137,9 @@ impl PeerReputationLedger {
                     return PeerTier::Banned;
                 } else {
                     record.banned_until_sec = None;
-                    record.score = THRESHOLD_QUARANTINED; // reinstate with quarantine score
+                    record.score = THRESHOLD_QUARANTINED; // reinstate with quarantine score (-500)
+                    record.last_update_sec = banned_until;
+                    record.infraction_count = record.infraction_count.saturating_sub(1);
                 }
             }
 

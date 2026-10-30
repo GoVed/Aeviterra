@@ -8,10 +8,13 @@ pub const QUANTUM_GAMEPLAY: usize  = 20_000;      // 20%
 pub const QUANTUM_AUDIT: usize     = 10_000;      // 10%
 pub const QUANTUM_RECOVERY: usize  =  5_000;      //  5% guaranteed floor
 
+pub const MAX_CONSENSUS_QUEUE_LEN: usize = 1_000;
+pub const MAX_CONTROL_QUEUE_LEN: usize = 500;
 pub const MAX_GAMEPLAY_QUEUE_LEN: usize = 500;
 pub const MAX_AUDIT_QUEUE_LEN: usize = 200;
 pub const MAX_RECOVERY_QUEUE_LEN: usize = 100;
 pub const MAX_CONSENSUS_QUEUE_LATENCY_TICKS: u64 = 2; // Preempt if consensus frame waits > 2 ticks
+pub const MAX_CONSECUTIVE_PREEMPTIONS: u8 = 4; // Cap consecutive preemptions to prevent DRR starvation
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedFrame {
@@ -21,7 +24,7 @@ pub struct QueuedFrame {
 
 /// Deficit Round-Robin (DRR) Multi-Queue Priority Scheduler.
 /// Solves bandwidth starvation across Consensus, Control, Gameplay, Audit, and Recovery queues
-/// with guaranteed bandwidth floor for state catchup and preemption for BFT consensus latency deadlines.
+/// with guaranteed bandwidth floor for state catchup and bounded preemption for BFT consensus latency deadlines.
 #[derive(Debug, Clone)]
 pub struct MultiQueueScheduler {
     pub consensus_q: VecDeque<QueuedFrame>,
@@ -38,6 +41,7 @@ pub struct MultiQueueScheduler {
     deficit_recovery: usize,
 
     current_queue_index: usize,
+    consecutive_preemptions: u8,
 }
 
 impl Default for MultiQueueScheduler {
@@ -62,10 +66,11 @@ impl MultiQueueScheduler {
             deficit_recovery: 0,
 
             current_queue_index: 0,
+            consecutive_preemptions: 0,
         }
     }
 
-    /// Enqueue a frame with priority-specific drop policies.
+    /// Enqueue a frame with bounded capacity and priority-specific drop policies.
     pub fn enqueue(&mut self, frame: WireFrame, current_tick: u64) {
         let q_frame = QueuedFrame {
             frame,
@@ -74,11 +79,16 @@ impl MultiQueueScheduler {
 
         match q_frame.frame.queue {
             PriorityQueue::Consensus => {
-                // Zero drop: consensus frames are critical for liveness and safety
+                // Bounded capacity to prevent spoofed consensus flood OOM
+                if self.consensus_q.len() >= MAX_CONSENSUS_QUEUE_LEN {
+                    self.consensus_q.pop_front();
+                }
                 self.consensus_q.push_back(q_frame);
             }
             PriorityQueue::Control => {
-                // Zero drop: 2PC and halo synchronization transitions are durable
+                if self.control_q.len() >= MAX_CONTROL_QUEUE_LEN {
+                    self.control_q.pop_front();
+                }
                 self.control_q.push_back(q_frame);
             }
             PriorityQueue::Gameplay => {
@@ -104,17 +114,33 @@ impl MultiQueueScheduler {
     }
 
     /// Dispatch next frame to transmit over the network socket.
-    /// Checks for urgent consensus preemption first, then executes Deficit Round Robin.
+    /// Checks for urgent consensus preemption first (bounded by `MAX_CONSECUTIVE_PREEMPTIONS`),
+    /// then executes Deficit Round Robin across all priority queues.
     pub fn dispatch_next(&mut self, current_tick: u64) -> Option<QueuedFrame> {
-        // 1. Preemption Override: if the head consensus frame has waited > 2 ticks, dispatch immediately
-        if let Some(head) = self.consensus_q.front()
-            && current_tick.saturating_sub(head.enqueued_tick) >= MAX_CONSENSUS_QUEUE_LATENCY_TICKS {
+        if self.is_empty() {
+            self.consecutive_preemptions = 0;
+            return None;
+        }
+
+        let has_non_consensus = !self.control_q.is_empty()
+            || !self.gameplay_q.is_empty()
+            || !self.audit_q.is_empty()
+            || !self.recovery_q.is_empty();
+
+        // 1. Bounded Preemption Override: if the head consensus frame has waited >= 2 ticks,
+        // dispatch immediately up to MAX_CONSECUTIVE_PREEMPTIONS before yielding to DRR.
+        if (!has_non_consensus || self.consecutive_preemptions < MAX_CONSECUTIVE_PREEMPTIONS)
+            && let Some(head) = self.consensus_q.front()
+            && current_tick.saturating_sub(head.enqueued_tick) >= MAX_CONSENSUS_QUEUE_LATENCY_TICKS
+        {
+            self.consecutive_preemptions = self.consecutive_preemptions.saturating_add(1);
             return self.consensus_q.pop_front();
         }
 
-        if self.is_empty() {
-            return None;
+        if self.consecutive_preemptions >= MAX_CONSECUTIVE_PREEMPTIONS && has_non_consensus && self.current_queue_index == 0 {
+            self.current_queue_index = 1;
         }
+        self.consecutive_preemptions = 0;
 
         // 2. Deficit Round Robin across queues: 0=Consensus, 1=Control, 2=Gameplay, 3=Audit, 4=Recovery
         for _ in 0..5 {
@@ -152,12 +178,11 @@ impl MultiQueueScheduler {
                 _ => None,
             };
 
+            self.current_queue_index = (self.current_queue_index + 1) % 5;
+
             if let Some(frame) = served {
                 return Some(frame);
             }
-
-            // Move to next queue in round robin
-            self.current_queue_index = (self.current_queue_index + 1) % 5;
         }
 
         // If all deficit buckets exhausted in this cycle, replenish deficits and retry

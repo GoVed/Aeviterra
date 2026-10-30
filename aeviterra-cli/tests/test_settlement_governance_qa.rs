@@ -757,3 +757,100 @@ fn test_14_10_player_municipal_governance_end_to_end_campaign_audit() {
     assert_eq!(charter.plots.len(), 10);
     assert_eq!(charter.residents.len(), 10);
 }
+
+// ============================================================================
+// PART 4: ROUND 2 ADVERSARIAL AUDIT & EXPLOIT PROBES
+// ============================================================================
+
+/// Test 15: Round 2 Verification — Bounded plot ownership and structure stacking limits (E19).
+/// Verifies MAX_PLOTS_PER_RESIDENT = 4 and MAX_STRUCTURES_PER_PLOT = 32 enforcement.
+#[test]
+fn test_15_round2_adversarial_plot_monopoly_and_structure_capacity_limits() {
+    let mut charter = SettlementCharter::new(1, "E19 Defense Freehold".to_string(), 1000);
+    let baron_id = 9001u64;
+    let other_player = 9002u64;
+
+    // 1. Land Baron claims 4 plots (maximum allowed)
+    for i in 1..=4 {
+        assert_eq!(charter.claim_plot(i, baron_id, 100), Ok(()));
+    }
+    assert_eq!(charter.plots.len(), 4);
+
+    // 2. Land Baron attempts to monopolize a 5th plot -> Blocked by ResidentPlotLimitExceeded
+    assert_eq!(
+        charter.claim_plot(5, baron_id, 101),
+        Err(SettlementError::ResidentPlotLimitExceeded),
+        "5th plot claim must be blocked by MAX_PLOTS_PER_RESIDENT limit"
+    );
+
+    // 3. Second-order bypass attempt: Re-claiming an existing plot does NOT allow a bypass
+    assert_eq!(
+        charter.claim_plot(1, baron_id, 102),
+        Err(SettlementError::PlotAlreadyClaimed)
+    );
+
+    // 4. Another legitimate resident CAN claim plot 5
+    assert_eq!(charter.claim_plot(5, other_player, 103), Ok(()));
+    assert_eq!(charter.plots.len(), 5);
+
+    // 5. Structure stacking limits: Build exactly 32 structures on Plot 1
+    let wall = StructuralPrimitive {
+        style: ArchitecturalStyle::FortifiedCitadel,
+        primary_material: MaterialType::Granite,
+        secondary_material: MaterialType::SteelAlloy,
+        length: Q64::from_int(10).unwrap(),
+        height: Q64::from_int(4).unwrap(),
+        thickness: Q64::from_int(2).unwrap(),
+        features: 0,
+    };
+
+    for _ in 0..MAX_STRUCTURES_PER_PLOT {
+        assert_eq!(charter.build_structure(1, baron_id, wall.clone()), Ok(()));
+    }
+    assert_eq!(charter.plots.get(&1).unwrap().built_structures.len(), 32);
+
+    // 6. Attempting to build 33rd structure -> Blocked by PlotCapacityExceeded
+    assert_eq!(
+        charter.build_structure(1, baron_id, wall.clone()),
+        Err(SettlementError::PlotCapacityExceeded),
+        "33rd structure must be blocked by MAX_STRUCTURES_PER_PLOT limit"
+    );
+    assert_eq!(charter.plots.get(&1).unwrap().built_structures.len(), 32);
+}
+
+/// Test 16: Round 2 Adversarial Audit — Integer Boundary & Non-Atomic Mutation Vulnerability Probe.
+/// Probes:
+/// 1. Non-atomic partial mutation in pay_tax when treasury marks overflow u64::MAX.
+/// 2. Arithmetic overflow in tenure calculation when registration_tick is near u64::MAX.
+#[test]
+fn test_16_round2_adversarial_overflow_and_partial_mutation_vulnerabilities() {
+    let mut charter = SettlementCharter::new(1, "Overflow Citadel".to_string(), 1000);
+    let actor_id = 9999u64;
+
+    assert!(charter.claim_plot(1, actor_id, 100).is_ok());
+
+    // --- Vulnerability Probe A: Non-Atomic State Mutation on Treasury Overflow ---
+    // Seed settlement treasury to near u64::MAX
+    charter.treasury_marks = u64::MAX - 50;
+
+    // Resident attempts to pay 100 Marks (MIN_TAX_BOND_MARKS).
+    // The treasury cannot hold u64::MAX - 50 + 100, so pay_tax fails with TaxCalculationOverflow.
+    let pay_res = charter.pay_tax(actor_id, 100);
+    assert_eq!(pay_res, Err(SettlementError::TaxCalculationOverflow));
+
+    // R2-05 Remediation: Atomic rollback leaves cumulative_taxes_paid strictly at 0 when treasury overflows!
+    let taxes_recorded = charter.residents.get(&actor_id).unwrap().cumulative_taxes_paid;
+    assert_eq!(taxes_recorded, 0, "R2-05 Remediated: Atomic rollback leaves cumulative_taxes_paid at 0 on treasury overflow!");
+
+    // --- Vulnerability Probe B: Election Tick Arithmetic Overflow Near u64::MAX (R2-06 Remediated) ---
+    let late_actor_id = 8888u64;
+    let late_tick = u64::MAX - 100_000;
+    assert!(charter.claim_plot(2, late_actor_id, late_tick).is_ok());
+
+    let vote_check = charter.can_vote_for_mayor(late_actor_id, late_tick);
+    assert_eq!(
+        vote_check,
+        Err(SettlementError::InsufficientTenure),
+        "R2-06 Remediated: can_vote_for_mayor handles near-u64::MAX registration ticks without overflow or panic!"
+    );
+}

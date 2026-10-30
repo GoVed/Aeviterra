@@ -83,11 +83,14 @@ impl StreamingFrameCodec {
 
         let length_prefix = u32::from_be_bytes(self.buffer[0..4].try_into().unwrap()) as usize;
         
-        // 1. Guard length prefix against allocation bomb
+        // 1. Guard length prefix against allocation bomb (drain bad prefix to prevent head-of-line blocking)
         if length_prefix > self.max_packet_size {
+            self.buffer.drain(0..4);
             return Err(FramingError::FrameTooLarge(length_prefix));
         }
         if length_prefix < Self::HEADER_LEN + Self::CHECKSUM_SIZE {
+            let drain_len = (4 + length_prefix).min(self.buffer.len());
+            self.buffer.drain(0..drain_len);
             return Err(FramingError::MalformedPayload);
         }
 
@@ -97,8 +100,9 @@ impl StreamingFrameCodec {
             return Ok(None);
         }
 
-        // 2. Extract frame slice
-        let frame_slice = &self.buffer[4..total_frame_len];
+        // 2. Drain complete frame slice upfront so any header/checksum failure never poisons pipelined frames
+        let frame_vec: Vec<u8> = self.buffer.drain(0..total_frame_len).collect();
+        let frame_slice = &frame_vec[4..total_frame_len];
 
         // 3. Validate magic
         if &frame_slice[0..4] != MAGIC_HEADER {
@@ -136,9 +140,6 @@ impl StreamingFrameCodec {
         }
 
         let payload = frame_slice[Self::HEADER_LEN..payload_end].to_vec();
-
-        // 7. Drain consumed frame from buffer
-        self.buffer.drain(0..total_frame_len);
 
         Ok(Some(WireFrame {
             magic: *MAGIC_HEADER,

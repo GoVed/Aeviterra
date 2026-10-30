@@ -47,6 +47,14 @@ impl ThermodynamicLedger {
         residue_resource: ResourceId,
         residue_amount: u64,
     ) -> Result<(), EconomicError> {
+        // Reject degenerate self-transmutation or residue laundering (prevents input == output balance overwrite duplication)
+        if input_resource == output_resource
+            || input_resource == residue_resource
+            || output_resource == residue_resource
+        {
+            return Err(EconomicError::MassConservationViolation);
+        }
+
         // Invariant I5: Mass conservation
         let input_total = input_amount as u128;
         let output_total = (output_amount as u128)
@@ -106,17 +114,21 @@ impl SovereignDemurrageLedger {
     }
 
     pub fn mint_certified_faucet(&mut self, owner_id: u64, amount: u64, current_tick: u64) -> Result<(), EconomicError> {
-        self.total_sovereign_supply = self.total_sovereign_supply
+        let new_supply = self.total_sovereign_supply
             .checked_add(amount)
             .ok_or(EconomicError::ArithmeticOverflow)?;
+        let cur_bal = self.vaults.get(&owner_id).map(|v| v.balance_sovereigns).unwrap_or(0);
+        let new_bal = cur_bal
+            .checked_add(amount)
+            .ok_or(EconomicError::ArithmeticOverflow)?;
+
+        self.total_sovereign_supply = new_supply;
         let vault = self.vaults.entry(owner_id).or_insert(SovereignVault {
             owner_id,
             balance_sovereigns: 0,
             last_active_tick: current_tick,
         });
-        vault.balance_sovereigns = vault.balance_sovereigns
-            .checked_add(amount)
-            .ok_or(EconomicError::ArithmeticOverflow)?;
+        vault.balance_sovereigns = new_bal;
         vault.last_active_tick = current_tick;
         Ok(())
     }
@@ -126,8 +138,21 @@ impl SovereignDemurrageLedger {
         if from_bal < amount {
             return Err(EconomicError::InsufficientBalance);
         }
+        if from_id == to_id {
+            if let Some(v) = self.vaults.get_mut(&from_id) {
+                v.last_active_tick = current_tick;
+            }
+            return Ok(());
+        }
+
+        let to_bal = self.vaults.get(&to_id).map(|v| v.balance_sovereigns).unwrap_or(0);
+        let new_to_bal = to_bal
+            .checked_add(amount)
+            .ok_or(EconomicError::ArithmeticOverflow)?;
+
+        // Atomic commit: apply debit and credit only after both checks succeed
         if let Some(v) = self.vaults.get_mut(&from_id) {
-            v.balance_sovereigns -= amount;
+            v.balance_sovereigns = from_bal - amount;
             v.last_active_tick = current_tick;
         }
         let to_vault = self.vaults.entry(to_id).or_insert(SovereignVault {
@@ -135,9 +160,7 @@ impl SovereignDemurrageLedger {
             balance_sovereigns: 0,
             last_active_tick: current_tick,
         });
-        to_vault.balance_sovereigns = to_vault.balance_sovereigns
-            .checked_add(amount)
-            .ok_or(EconomicError::ArithmeticOverflow)?;
+        to_vault.balance_sovereigns = new_to_bal;
         to_vault.last_active_tick = current_tick;
         Ok(())
     }

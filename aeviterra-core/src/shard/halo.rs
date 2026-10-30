@@ -2,6 +2,7 @@ use crate::math::fixed::{Q64, Vec3Fixed, AabbFixed, SweptCapsule, MathError};
 use serde::{Serialize, Deserialize};
 
 pub const CHUNK_SIZE_METERS: i64 = 128;
+pub const MAX_SWEPT_HALO_CHUNKS: i64 = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChunkCoord {
@@ -16,12 +17,13 @@ impl ChunkCoord {
     }
 
     /// Convert continuous world position to discrete chunk coordinate using exact floor division (F11, F14).
-    /// Ensures negative coordinates (e.g., -0.5m) map to chunk -1 rather than truncating toward zero into chunk 0.
+    /// Ensures negative coordinates (e.g., -0.5m) map to chunk -1 rather than truncating toward zero into chunk 0,
+    /// and clamps extreme astronomical coordinates to `[i32::MIN, i32::MAX]` to prevent `as i32` wraparound inversion.
     pub fn from_world_pos(pos: Vec3Fixed) -> Self {
         let chunk_size = CHUNK_SIZE_METERS;
-        let cx = pos.x.to_int_floor().div_euclid(chunk_size) as i32;
-        let cy = pos.y.to_int_floor().div_euclid(chunk_size) as i32;
-        let cz = pos.z.to_int_floor().div_euclid(chunk_size) as i32;
+        let cx = pos.x.to_int_floor().div_euclid(chunk_size).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let cy = pos.y.to_int_floor().div_euclid(chunk_size).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let cz = pos.z.to_int_floor().div_euclid(chunk_size).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         ChunkCoord { x: cx, y: cy, z: cz }
     }
 
@@ -93,6 +95,7 @@ impl DynamicHaloCalculator {
     }
 
     /// Determine which chunks overlap with a continuous swept trajectory.
+    /// Enforces a strict volume ceiling (`MAX_SWEPT_HALO_CHUNKS`) to prevent O(N^3) allocation DoS attacks.
     pub fn calculate_affected_chunks(
         &self,
         trajectory: &SweptCapsule,
@@ -102,7 +105,20 @@ impl DynamicHaloCalculator {
         let min_chunk = ChunkCoord::from_world_pos(swept_aabb.min);
         let max_chunk = ChunkCoord::from_world_pos(swept_aabb.max);
 
-        let mut affected = Vec::new();
+        let dx = (max_chunk.x as i64).saturating_sub(min_chunk.x as i64).saturating_add(1);
+        let dy = (max_chunk.y as i64).saturating_sub(min_chunk.y as i64).saturating_add(1);
+        let dz = (max_chunk.z as i64).saturating_sub(min_chunk.z as i64).saturating_add(1);
+
+        if dx <= 0 || dy <= 0 || dz <= 0 {
+            return Err(MathError::InvalidDomain);
+        }
+
+        let total_volume = dx.saturating_mul(dy).saturating_mul(dz);
+        if total_volume > MAX_SWEPT_HALO_CHUNKS {
+            return Err(MathError::Overflow);
+        }
+
+        let mut affected = Vec::with_capacity(total_volume as usize);
         for cx in min_chunk.x..=max_chunk.x {
             for cy in min_chunk.y..=max_chunk.y {
                 for cz in min_chunk.z..=max_chunk.z {
