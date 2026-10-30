@@ -39,6 +39,8 @@ pub enum SettlementError {
     InvalidStructureConstraints,
     SybilVotingDisqualified,
     InsufficientTenure,
+    InsufficientTreasuryFunds,
+    TaxCalculationOverflow,
 }
 
 impl SettlementCharter {
@@ -105,5 +107,32 @@ impl SettlementCharter {
         }
 
         Ok(true)
+    }
+
+    /// Deposit tax or municipal bond payment into the settlement treasury.
+    /// Updates the resident's cumulative tax record and the municipal treasury balance.
+    pub fn pay_tax(&mut self, actor_id: u64, amount: u64) -> Result<(), SettlementError> {
+        let resident = self.residents.get_mut(&actor_id).ok_or(SettlementError::SybilVotingDisqualified)?;
+        resident.cumulative_taxes_paid = resident.cumulative_taxes_paid.checked_add(amount)
+            .ok_or(SettlementError::TaxCalculationOverflow)?;
+        self.treasury_marks = self.treasury_marks.checked_add(amount)
+            .ok_or(SettlementError::TaxCalculationOverflow)?;
+        Ok(())
+    }
+
+    /// Disburse funds from municipal treasury for public infrastructure or defense.
+    pub fn disburse_treasury(&mut self, amount: u64) -> Result<(), SettlementError> {
+        if self.treasury_marks < amount {
+            return Err(SettlementError::InsufficientTreasuryFunds);
+        }
+        self.treasury_marks -= amount;
+        Ok(())
+    }
+
+    /// Elect or transfer mayorship to an eligible resident candidate.
+    pub fn elect_mayor(&mut self, candidate_id: u64, current_tick: u64) -> Result<(), SettlementError> {
+        self.can_vote_for_mayor(candidate_id, current_tick)?;
+        self.mayor_id = candidate_id;
+        Ok(())
     }
 }

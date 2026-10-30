@@ -63,16 +63,16 @@ impl ThermodynamicLedger {
             return Err(EconomicError::InsufficientBalance);
         }
 
-        // Apply debit and credit
-        self.entity_balances.insert((crafter_id, input_resource), current_bal - input_amount);
-
         let out_bal = self.get_balance(crafter_id, output_resource);
         let new_out = out_bal.checked_add(output_amount).ok_or(EconomicError::ArithmeticOverflow)?;
-        self.entity_balances.insert((crafter_id, output_resource), new_out);
 
         // Deposit residue to world sink (e.g. slag, ash, environmental matter)
         let sink_bal = self.world_sinks.get(&residue_resource).copied().unwrap_or(0);
         let new_sink = sink_bal.checked_add(residue_amount).ok_or(EconomicError::ArithmeticOverflow)?;
+
+        // Atomic commit: Apply debit, credit, and sink deposit only after all invariant checks pass
+        self.entity_balances.insert((crafter_id, input_resource), current_bal - input_amount);
+        self.entity_balances.insert((crafter_id, output_resource), new_out);
         self.world_sinks.insert(residue_resource, new_sink);
 
         Ok(())

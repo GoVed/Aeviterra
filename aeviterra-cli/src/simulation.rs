@@ -33,7 +33,7 @@ pub struct NpcEntity {
     pub is_hostile: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PlayerIntent {
     Move { dx: Q64, dz: Q64 },
     Attack(CombatActionType),
@@ -45,7 +45,7 @@ pub enum PlayerIntent {
     EquipItem(u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameEvent {
     EntityMoved { id: u64, new_pos: Vec3Fixed },
     CombatActionExecuted { actor_id: u64, action: CombatActionType, stamina_cost: u32 },
